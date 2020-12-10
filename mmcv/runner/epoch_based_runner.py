@@ -37,16 +37,51 @@ class EpochBasedRunner(BaseRunner):
             self.log_buffer.update(outputs['log_vars'], outputs['num_samples'])
         self.outputs = outputs
 
+
+    
     def train(self, data_loader, **kwargs):
         self.model.train()
         self.mode = 'train'
         self.data_loader = data_loader
         self._max_iters = self._max_epochs * len(self.data_loader)
+
+
+        
+        def prefetcher(load_iterator):
+            prefetch_stream = torch.cuda.Stream()
+
+            def _prefetch():
+                try:
+                    # I'm not sure why the trailing _ is necessary but the reference used
+                    # "for i, (images, targets, _) in enumerate(data_loader):" so I'll keep it.
+                    images = next(load_iterator)
+                except StopIteration:
+                    return None
+                #print(images)
+                #with torch.cuda.stream(prefetch_stream):
+                #    # TODO:  I'm not sure if the dataloader knows how to pin the targets' datatype.
+                #    targets = [target.to(device, non_blocking=True) for target in targets]
+                #    images['img'] = images['img'].to("cuda", non_blocking=True)
+
+                return images
+
+            next_images = _prefetch()
+
+            while next_images is not None:
+                torch.cuda.current_stream().wait_stream(prefetch_stream)
+                current_images = next_images
+                next_images = _prefetch()
+                yield current_images
+        
         self.call_hook('before_train_epoch')
         time.sleep(2)  # Prevent possible deadlock during epoch transition
-        for i, data_batch in enumerate(self.data_loader):
+
+        for i, data_batch in enumerate(prefetcher(iter(self.data_loader))):
+        #for i, data_batch in enumerate(self.data_loader):
             self._inner_iter = i
             self.call_hook('before_train_iter')
+            #print(data_batch)
+            #print(len(data_batch))
             self.run_iter(data_batch, train_mode=True)
             self.call_hook('after_train_iter')
             self._iter += 1
